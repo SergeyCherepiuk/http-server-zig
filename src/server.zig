@@ -1,7 +1,10 @@
 const std = @import("std");
+const io = std.io;
 const os = std.os;
 const net = std.net;
 const mem = std.mem;
+
+pub const io_mode = io.Mode.blocking;
 
 const UnbufferedWriter = @import("common/writer.zig").UnbufferedWriter;
 
@@ -9,21 +12,22 @@ pub const TCPServer = struct {
     allocator: mem.Allocator,
     address: net.Address,
 
-    const socket_domain = os.system.AF.INET;
-    const socket_type = os.system.SOCK.STREAM;
-    const socket_protocol = os.system.IPPROTO.TCP;
-    const socket_accept_flags = 0;
-
     pub fn init(allocator: mem.Allocator, host: []const u8, port: u16) !TCPServer {
         return TCPServer{
             .allocator = allocator,
-            .address = try net.Address.parseIp(host, port),
+            .address = try net.Address.parseIp4(host, port),
         };
     }
 
     pub const StartOptions = struct { backlog: u31 = 10 };
 
     pub fn start(self: *TCPServer, options: StartOptions) !void {
+        const socket_domain = self.address.any.family;
+        const nonblock = if (io_mode == io.Mode.evented) os.SOCK.NONBLOCK else 0;
+        const socket_type = os.SOCK.STREAM | nonblock | os.SOCK.CLOEXEC;
+        const socket_protocol = os.IPPROTO.TCP;
+        const socket_accept_flags = 0;
+
         var socket = try os.socket(socket_domain, socket_type, socket_protocol);
         defer os.closeSocket(socket);
 
@@ -70,8 +74,11 @@ pub const TCPServer = struct {
         return message.items;
     }
 
-    fn send(_: TCPServer, connection: os.socket_t, message: []const u8) !usize {
-        const bytes_read = try os.send(connection, message, 0);
+    fn send(self: TCPServer, connection: os.socket_t, message: []const u8) !usize {
+        const socket_address = @constCast(&self.address.any);
+        const socket_length = self.address.getOsSockLen();
+
+        const bytes_read = try os.sendto(connection, message, 0, socket_address, socket_length);
 
         std.log.info("Sent: \"{s}\" ({d} bytes)", .{ message, bytes_read });
 

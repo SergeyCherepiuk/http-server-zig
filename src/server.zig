@@ -8,27 +8,41 @@ pub const io_mode = io.Mode.blocking;
 
 const UnbufferedWriter = @import("common/writer.zig").UnbufferedWriter;
 
+pub const SocketOptions = struct {
+    domain: u32,
+    type: u32,
+    protocol: u32,
+    accept_flags: u32,
+};
+
 pub const TCPServer = struct {
     allocator: mem.Allocator,
     address: net.Address,
+    socket_options: SocketOptions,
 
     pub fn init(allocator: mem.Allocator, host: []const u8, port: u16) !TCPServer {
+        const address = try net.Address.parseIp(host, port);
+        const nonblock = if (io_mode == io.Mode.evented) os.SOCK.NONBLOCK else 0;
         return TCPServer{
             .allocator = allocator,
-            .address = try net.Address.parseIp4(host, port),
+            .address = address,
+            .socket_options = .{
+                .domain = address.any.family,
+                .type = os.SOCK.STREAM | nonblock | os.SOCK.CLOEXEC,
+                .protocol = os.IPPROTO.TCP,
+                .accept_flags = os.SOCK.CLOEXEC,
+            },
         };
     }
 
     pub const StartOptions = struct { backlog: u31 = 10 };
 
     pub fn start(self: *TCPServer, options: StartOptions) !void {
-        const socket_domain = self.address.any.family;
-        const nonblock = if (io_mode == io.Mode.evented) os.SOCK.NONBLOCK else 0;
-        const socket_type = os.SOCK.STREAM | nonblock | os.SOCK.CLOEXEC;
-        const socket_protocol = os.IPPROTO.TCP;
-        const socket_accept_flags = 0;
-
-        var socket = try os.socket(socket_domain, socket_type, socket_protocol);
+        var socket = try os.socket(
+            self.socket_options.domain,
+            self.socket_options.type,
+            self.socket_options.protocol,
+        );
         defer os.closeSocket(socket);
 
         const socket_address = @constCast(&self.address.any);
@@ -43,13 +57,32 @@ pub const TCPServer = struct {
         std.log.info("Server is listening on port {s}", .{buf.buffer()});
 
         while (true) {
-            const connection = try os.accept(socket, socket_address, socket_length, socket_accept_flags);
+            const connection = try self.accept(socket);
 
             const message = try self.receive(connection);
             _ = try self.send(connection, message);
 
             os.closeSocket(connection);
         }
+    }
+
+    fn accept(self: TCPServer, socket: os.socket_t) !os.socket_t {
+        const peer_socket_address = try self.allocator.create(net.Address);
+        peer_socket_address.any.family = os.AF.INET; // TODO: Review usage INET here
+        const peer_socket_length = self.address.getOsSockLen();
+
+        const connection = try os.accept(
+            socket,
+            @constCast(&peer_socket_address.any),
+            @constCast(&peer_socket_length),
+            self.socket_options.accept_flags,
+        );
+
+        var buf = UnbufferedWriter.init(self.allocator);
+        try peer_socket_address.format("", .{}, buf.writer());
+        std.log.info("Connection established with {s}", .{buf.buffer()});
+
+        return connection;
     }
 
     fn receive(self: TCPServer, connection: os.socket_t) ![]const u8 {
@@ -85,8 +118,3 @@ pub const TCPServer = struct {
         return bytes_read;
     }
 };
-
-pub fn main() !void {
-    var server = try TCPServer.init(std.heap.page_allocator, "127.0.0.1", 0);
-    try server.start(.{});
-}

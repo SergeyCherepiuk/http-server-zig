@@ -9,6 +9,10 @@ pub const UnbufferedWriter = struct {
         return UnbufferedWriter{ .buf = std.ArrayList(u8).init(allocator) };
     }
 
+    pub fn deinit(self: UnbufferedWriter) void {
+        self.buf.deinit();
+    }
+
     pub fn buffer(self: UnbufferedWriter) []const u8 {
         return self.buf.items;
     }

@@ -12,7 +12,6 @@ pub const SocketOptions = struct {
     domain: u32,
     type: u32,
     protocol: u32,
-    accept_flags: u32,
 };
 
 pub const TCPServer = struct {
@@ -30,7 +29,6 @@ pub const TCPServer = struct {
                 .domain = address.any.family,
                 .type = os.SOCK.STREAM | nonblock | os.SOCK.CLOEXEC,
                 .protocol = os.IPPROTO.TCP,
-                .accept_flags = os.SOCK.CLOEXEC,
             },
         };
     }
@@ -53,65 +51,81 @@ pub const TCPServer = struct {
         try os.listen(socket, options.backlog);
 
         var buf = UnbufferedWriter.init(self.allocator);
+        defer buf.deinit();
         try self.address.format("", .{}, buf.writer());
         std.log.info("Server is listening on port {s}", .{buf.buffer()});
 
         while (true) {
-            const connection = try self.accept(socket);
+            const peer = try self.accept(socket);
 
-            const message = try self.receive(connection);
-            _ = try self.send(connection, message);
+            const message = try self.receive(peer);
+            if (message.ok) {
+                _ = try self.send(peer, message.message);
+            }
 
-            os.closeSocket(connection);
+            os.closeSocket(peer.socket);
         }
     }
 
-    fn accept(self: TCPServer, socket: os.socket_t) !os.socket_t {
+    const Peer = struct {
+        socket: os.socket_t,
+        socket_address: os.sockaddr,
+        socket_length: os.socklen_t,
+    };
+
+    fn accept(self: TCPServer, socket: os.socket_t) !Peer {
         const peer_socket_address = try self.allocator.create(net.Address);
-        peer_socket_address.any.family = os.AF.INET; // TODO: Review usage INET here
+        peer_socket_address.any.family = self.address.any.family;
         const peer_socket_length = self.address.getOsSockLen();
 
-        const connection = try os.accept(
+        const accept_flags = 0;
+        const peer_socket = try os.accept(
             socket,
             @constCast(&peer_socket_address.any),
             @constCast(&peer_socket_length),
-            self.socket_options.accept_flags,
+            accept_flags,
         );
 
         var buf = UnbufferedWriter.init(self.allocator);
+        defer buf.deinit();
         try peer_socket_address.format("", .{}, buf.writer());
         std.log.info("Connection established with {s}", .{buf.buffer()});
 
-        return connection;
+        return Peer{
+            .socket = peer_socket,
+            .socket_address = peer_socket_address.any,
+            .socket_length = peer_socket_length,
+        };
     }
 
-    fn receive(self: TCPServer, connection: os.socket_t) ![]const u8 {
+    const Message = struct { message: []const u8, ok: bool };
+
+    fn receive(self: TCPServer, peer: Peer) !Message {
         var message = std.ArrayList(u8).init(self.allocator);
 
         var buf: [256]u8 = undefined;
         while (true) {
-            var file_descriptors = [_]os.pollfd{.{
-                .fd = connection,
-                .events = os.POLL.IN,
-                .revents = 0,
-            }};
-            const available = try os.poll(&file_descriptors, 0);
+            var fd = os.pollfd{ .fd = peer.socket, .events = os.POLL.IN, .revents = 0 };
+            const available = try os.poll(@constCast(&[_]os.pollfd{fd}), 0);
             if (available <= 0) break;
 
-            const bytes_read = try os.recv(connection, &buf, 0);
+            const bytes_read = try os.recv(peer.socket, &buf, 0);
+            if (bytes_read == 0) {
+                message.deinit();
+                return Message{ .message = "", .ok = false };
+            }
+
             try message.appendSlice(buf[0..bytes_read]);
         }
 
         std.log.info("Received: \"{s}\" ({d} bytes)", .{ message.items, message.items.len });
 
-        return message.items;
+        return Message{ .message = message.items, .ok = true };
     }
 
-    fn send(self: TCPServer, connection: os.socket_t, message: []const u8) !usize {
-        const socket_address = @constCast(&self.address.any);
-        const socket_length = self.address.getOsSockLen();
-
-        const bytes_read = try os.sendto(connection, message, 0, socket_address, socket_length);
+    fn send(_: TCPServer, peer: Peer, message: []const u8) !usize {
+        const send_flags = 0;
+        const bytes_read = try os.send(peer.socket, message, send_flags);
 
         std.log.info("Sent: \"{s}\" ({d} bytes)", .{ message, bytes_read });
 

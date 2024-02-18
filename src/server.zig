@@ -50,19 +50,19 @@ pub const TCPServer = struct {
         try os.getsockname(socket, socket_address, socket_length);
         try os.listen(socket, options.backlog);
 
-        var buf = UnbufferedWriter.init(self.allocator);
-        defer buf.deinit();
-        try self.address.format("", .{}, buf.writer());
-        std.log.info("Server is listening on port {s}", .{buf.buffer()});
+        {
+            var buf = UnbufferedWriter.init(self.allocator);
+            defer buf.deinit();
+            try self.address.format("", .{}, buf.writer());
+            std.log.info("Server is listening on port {s}", .{buf.buffer()});
+        }
 
         while (true) {
             const peer = try self.accept(socket);
-
             const message = try self.receive(peer);
             if (message.ok) {
                 _ = try self.send(peer, message.message);
             }
-
             os.closeSocket(peer.socket);
         }
     }
@@ -86,10 +86,12 @@ pub const TCPServer = struct {
             accept_flags,
         );
 
-        var buf = UnbufferedWriter.init(self.allocator);
-        defer buf.deinit();
-        try peer_socket_address.format("", .{}, buf.writer());
-        std.log.info("Connection established with {s}", .{buf.buffer()});
+        {
+            var buf = UnbufferedWriter.init(self.allocator);
+            defer buf.deinit();
+            try peer_socket_address.format("", .{}, buf.writer());
+            std.log.info("Connection established with {s}", .{buf.buffer()});
+        }
 
         return Peer{
             .socket = peer_socket,
@@ -101,19 +103,16 @@ pub const TCPServer = struct {
     const Message = struct { message: []const u8, ok: bool };
 
     fn receive(self: TCPServer, peer: Peer) !Message {
-        var message = std.ArrayList(u8).init(self.allocator);
+        var message = try std.ArrayList(u8).initCapacity(self.allocator, 128);
 
-        var buf: [256]u8 = undefined;
+        var buf: [128]u8 = undefined;
         while (true) {
             var fd = os.pollfd{ .fd = peer.socket, .events = os.POLL.IN, .revents = 0 };
             const available = try os.poll(@constCast(&[_]os.pollfd{fd}), 0);
             if (available <= 0) break;
 
             const bytes_read = try os.recv(peer.socket, &buf, 0);
-            if (bytes_read == 0) {
-                message.deinit();
-                return Message{ .message = "", .ok = false };
-            }
+            if (bytes_read == 0) break;
 
             try message.appendSlice(buf[0..bytes_read]);
         }
